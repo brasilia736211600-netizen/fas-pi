@@ -1,0 +1,84 @@
+# Reusable heavy-job offload: run on free GitHub Actions runners instead of a
+# weak phone. Trigger from Termux with:
+#   fas offload --repo OWNER/REPO --field task=build
+# or: gh workflow run cloud-offload.yml --ref BRANCH -f task=test
+#
+# Convention: task=test runs pytest here; task=build runs ./offload-build.sh
+# when the repo provides it; task=custom runs the `run` input verbatim.
+name: Cloud Offload
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "Job to run"
+        type: choice
+        options: [test, build, custom]
+        default: test
+      run:
+        description: "Shell command (only for task=custom)"
+        type: string
+        default: ""
+      artifact:
+        description: "Path to upload as artifact (optional)"
+        type: string
+        default: ""
+      retention-days:
+        description: "Artifact retention days"
+        type: string
+        default: "7"
+      timeout-minutes:
+        description: "Job timeout minutes"
+        type: string
+        default: "30"
+
+permissions:
+  contents: read
+
+jobs:
+  offload:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ fromJSON(inputs.timeout-minutes) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        if: inputs.task == 'test'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run tests
+        if: inputs.task == 'test'
+        run: |
+          python -m pip install --upgrade pytest
+          python -m pytest -q
+
+      - name: Run repo build script
+        if: inputs.task == 'build'
+        run: |
+          if [ -x ./offload-build.sh ]; then
+            ./offload-build.sh
+          else
+            echo "no executable ./offload-build.sh in this repo" >&2
+            exit 1
+          fi
+
+      - name: Run custom command
+        if: inputs.task == 'custom'
+        run: |
+          if [ -z "${{ inputs.run }}" ]; then
+            echo "task=custom needs the 'run' input" >&2
+            exit 1
+          fi
+          ${{ inputs.run }}
+
+      - name: Upload artifact
+        if: inputs.artifact != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: offload-result
+          path: ${{ inputs.artifact }}
+          if-no-files-found: warn
+          retention-days: ${{ fromJSON(inputs.retention-days) }}

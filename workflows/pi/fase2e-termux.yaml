@@ -1,0 +1,20 @@
+description: "Termux E2E: add E2E marker to app.js, then run node test."
+phases:
+  - id: implement
+    thinking: off
+    tools: [read, edit]
+    system: "You are the implement phase. Make the smallest edit that satisfies the task. Only touch app.js."
+    prompt: |
+      Task: {{input}}
+      Repo files: app.js exports add(a,b); test.js requires the string E2E-MARKER inside app.js.
+      Edit ONLY app.js: keep the add function working and add a comment line containing exactly E2E-MARKER (e.g. // E2E-MARKER).
+      Do not touch test.js or package.json. Reply with a 3-line summary of what you changed.
+  - id: verify
+    thinking: off
+    tools: [read, bash]
+    system: "You are the verify phase. Run the test and report pass/fail exactly."
+    prompt: |
+      Task: {{input}}
+      Previous phase output:
+      {{phase.implement.output}}
+      Run `node test.js` in the repo cwd using bash, capture output, and reply with either VERIFY-PASS plus the test output, or VERIFY-FAIL plus the error. Do not edit files.

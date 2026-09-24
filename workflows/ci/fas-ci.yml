@@ -1,0 +1,46 @@
+name: FAS CI
+
+on:
+  push:
+    branches: ["fas-feature-test"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test runner
+        run: python -m pip install --upgrade pytest
+
+      - name: Run tests
+        shell: bash
+        run: |
+          set +e
+          python -m pytest -q
+          status=$?
+          echo "TEST_STATUS=$status" >> "$GITHUB_ENV"
+          exit "$status"
+
+      - name: Record CI evidence
+        if: always()
+        run: python -c "from fas_ci import write_ci_evidence; print(write_ci_evidence('.'))"
+
+      - name: Upload CI evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fas-ci-evidence
+          path: .fas/verification/ci_result.json
+          if-no-files-found: error
+          retention-days: 7

@@ -1,0 +1,55 @@
+name: FAS Plan - Encrypt
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.fas/FAS_FINAL_PLAN.md'
+
+permissions:
+  contents: write
+
+jobs:
+  encrypt:
+    runs-on: ubuntu-latest
+    environment:
+      name: fas-private-crypto
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate protected inputs
+        env:
+          FAS_PLAN_KEY: ${{ secrets.FAS_PLAN_KEY }}
+        run: |
+          set -euo pipefail
+          test -f .fas/FAS_FINAL_PLAN.md
+          test -n "$FAS_PLAN_KEY"
+
+      - name: Encrypt plan
+        env:
+          FAS_PLAN_KEY: ${{ secrets.FAS_PLAN_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt \
+            -in .fas/FAS_FINAL_PLAN.md \
+            -out .fas/FAS_FINAL_PLAN.enc \
+            -pass env:FAS_PLAN_KEY
+
+      - name: Remove plaintext before commit
+        run: rm -f .fas/FAS_FINAL_PLAN.md
+
+      - name: Commit encrypted plan
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .fas/FAS_FINAL_PLAN.enc
+          git add -u .fas/FAS_FINAL_PLAN.md || true
+          if git diff --cached --quiet; then
+            echo 'No encrypted-plan changes to commit.'
+            exit 0
+          fi
+          git commit -m 'chore: update encrypted FAS final plan'
+          git push

@@ -1,0 +1,37 @@
+name: FAS Plan - Manual Decrypt
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  decrypt:
+    runs-on: ubuntu-latest
+    environment:
+      name: fas-private-crypto
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate encrypted plan
+        run: test -f .fas/FAS_FINAL_PLAN.enc
+
+      - name: Decrypt to temporary workspace
+        env:
+          FAS_PLAN_KEY: ${{ secrets.FAS_PLAN_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$FAS_PLAN_KEY"
+          umask 077
+          tmpfile="$RUNNER_TEMP/FAS_FINAL_PLAN.md"
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in .fas/FAS_FINAL_PLAN.enc -out "$tmpfile" -pass env:FAS_PLAN_KEY
+          echo 'Decryption succeeded.'
+
+      - name: Upload plaintext as short-lived artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FAS-FINAL-PLAN-PLAINTEXT
+          path: ${{ runner.temp }}/FAS_FINAL_PLAN.md
+          retention-days: 1
