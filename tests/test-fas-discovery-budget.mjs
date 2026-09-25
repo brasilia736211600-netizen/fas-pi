@@ -131,6 +131,23 @@ async function D5_penalty_skip_and_failsafe() {
   assert(allBad.length === 1, "fail-safe: all-penalized pool still returns candidates (bounded retries prevent loops)");
 }
 
+async function D9_unknown_lanes_join_at_floor_not_top() {
+  // A brand-new lane (no KB stats) must never outrank a proven lane merely
+  // because the catalog lists it first. Unknown lanes join at floor score
+  // (below any lane with successes, above verified-failure skips).
+  const s = core.newEvidenceStore();
+  const rs = core.recordOutcome(s, { provider: "freeflow", id: "big-pickle", ok: true, latencyMs: 900, at: 1 });
+  const ranked = core.rankCandidates(
+    [M({ provider: "newprov", id: "shiny-new" }), M({ provider: "freeflow", id: "big-pickle" })], {}, rs);
+  assert(core.modelKey(ranked[0]) === "freeflow/big-pickle",
+    `proven lane stays on top vs unknown newcomer (got ${ranked.map(core.modelKey).join(",")})`);
+  assert(ranked.some((m) => m.provider === "newprov"), "unknown lane still admitted (exploration preserved)");
+  // equal footing: two unknowns keep deterministic order (no score lottery)
+  const r2 = core.rankCandidates(
+    [M({ provider: "b", id: "y" }), M({ provider: "a", id: "z" })], {}, core.newEvidenceStore());
+  assert(r2.map(core.modelKey).join(",") === "a/z,b/y", "unknown-vs-unknown stays deterministic");
+}
+
 async function D8_extension_lanes_surve_in_rank() {
   // Extension-registered lanes (freeflow/…) are absent from models-store.json
   // (their extension was not loaded there) yet live in the registry — and live
@@ -262,6 +279,7 @@ await runTest("B4. context threshold + advisory-only budgets", B4_context_thresh
 await runTest("B5. token-efficiency report renders", B5_token_efficiency_report_renders);
 await runTest("D7. negative cost is not a bonus", D7_negative_cost_is_not_a_bonus);
 await runTest("D8. extension lanes survive in rank", D8_extension_lanes_surve_in_rank);
+await runTest("D9. unknown lanes join at floor, not top", D9_unknown_lanes_join_at_floor_not_top);
 
 console.log(`\n=== FAS Discovery+Budget Suite ===`);
 console.log(`Passed: ${passed}/${passed + failed}`);

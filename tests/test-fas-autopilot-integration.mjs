@@ -17,10 +17,36 @@
  * TDD baseline: T1 and T2 FAIL on current source (Autopilot bypasses FAS).
  * Fix: make setupReasoningModel() FAS-aware and gate thinking="max" on
  * FAS-inactive state.
+ * T5/T6 (this fix): with FAS inactive, Autopilot must consult the FAS
+ * knowledge base — skip verified-failure / cooldown lanes and keep a
+ * proven healthy current lane instead of switching onto dead quota-gone
+ * models. TDD baseline: T5 and T6 FAIL on hint-only picking.
  */
 "use strict";
 import { createRequire } from "node:module";
+import * as fs from "node:fs";
 import * as path from "node:path";
+
+// Deterministic KB consult: point Autopilot at a missing KB by default so
+// T1–T4 pin the pre-evidence behavior; T5/T6 inject crafted fixtures.
+const HOME = process.env.HOME ?? "/data/data/com.termux/files/home";
+const AP_KB_NONE = "/nonexistent-ap-fas-kb.json";
+if (!process.env.AP_FAS_KB_PATH) process.env.AP_FAS_KB_PATH = AP_KB_NONE;
+
+async function withKb(kbObj, fn) {
+  const prev = process.env.AP_FAS_KB_PATH;
+  const dir = fs.mkdtempSync(path.join(HOME, "apkb-"));
+  const file = path.join(dir, "kb.json");
+  try {
+    fs.writeFileSync(file, JSON.stringify(kbObj));
+    process.env.AP_FAS_KB_PATH = file;
+    return await fn();
+  } finally {
+    if (prev === undefined) delete process.env.AP_FAS_KB_PATH;
+    else process.env.AP_FAS_KB_PATH = prev;
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+}
 
 const require_ = createRequire(import.meta.url);
 const PI = "/data/data/com.termux/files/usr/lib/node_modules/@earendil-works/pi-coding-agent";
@@ -140,10 +166,57 @@ async function T4_fas_inactive_regular_model_preserved() {
     `T4: thinking=max should be forced when FAS is inactive (calls: ${JSON.stringify(pi.setThinkingLevelCalls)})`);
 }
 
+async function T5_fas_inactive_skips_fas_blocked_lanes() {
+  const kb = {
+    stats: {
+      "dead/deepseek-v4-pro": { attempts: 3, successes: 0, failures: 3, consecutiveFailures: 3 },
+      "good/kimi-k3": { attempts: 2, successes: 2, failures: 0, consecutiveFailures: 0 },
+    },
+    providers: {},
+  };
+  const calls = await withKb(kb, async () => {
+    const pi = mockPi();
+    const dead = { provider: "dead", id: "deepseek-v4-pro", reasoning: true };
+    const good = { provider: "good", id: "kimi-k3", reasoning: true };
+    const ctx = mockCtx({ model: regularModel, availableModels: [dead, good] });
+    autopilot.default(pi);
+    const cmd = pi.registeredCommands.find((c) => c.name === "ap");
+    await cmd.handler("fix the bug", ctx);
+    return pi.setModelCalls;
+  });
+  assert(calls.length > 0 && calls[0].provider === "good",
+    `T5: blocked top-hint lane skipped, proven lane picked first (calls: ${JSON.stringify(calls.map((m) => m?.provider + "/" + m?.id))})`);
+  assert(!calls.some((m) => m.provider === "dead"),
+    "T5: FAS-blocked lane never attempted when a healthy lane has auth");
+}
+
+async function T6_healthy_proven_current_lane_kept() {
+  const kb = {
+    stats: {
+      "good/kimi-k3": { attempts: 3, successes: 3, failures: 0, consecutiveFailures: 0 },
+    },
+    providers: {},
+  };
+  const calls = await withKb(kb, async () => {
+    const pi = mockPi();
+    const cur = { provider: "good", id: "kimi-k3", reasoning: true };
+    const other = { provider: "dead", id: "deepseek-v4-pro", reasoning: true };
+    const ctx = mockCtx({ model: cur, availableModels: [other, cur] });
+    autopilot.default(pi);
+    const cmd = pi.registeredCommands.find((c) => c.name === "ap");
+    await cmd.handler("keep working", ctx);
+    return pi.setModelCalls;
+  });
+  assert(calls.length === 0,
+    `T6: proven healthy current lane kept, no model switch (calls: ${JSON.stringify(calls.map((m) => m?.provider + "/" + m?.id))})`);
+}
+
 await runTest("T1. FAS active → delegates through fas-router/auto, no thinking=max", T1_fas_active_delegates_through_fas_router);
 await runTest("T2. FAS inactive → picks reasoning model, thinking=max forced", T2_fas_inactive_picks_reasoning_model);
 await runTest("T3. FAS active → does not override FAS model or force thinking=max", T3_fas_active_respects_fas_model);
 await runTest("T4. FAS inactive with regular model → existing behavior preserved", T4_fas_inactive_regular_model_preserved);
+await runTest("T5. FAS inactive → FAS-blocked lanes skipped, proven lane first", T5_fas_inactive_skips_fas_blocked_lanes);
+await runTest("T6. FAS inactive → proven healthy current lane kept (no switch)", T6_healthy_proven_current_lane_kept);
 
 console.log(`\n=== FAS Autopilot Integration Suite ===`);
 console.log(`Passed: ${passed}/${passed + failed}`);

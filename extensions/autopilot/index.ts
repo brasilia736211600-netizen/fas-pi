@@ -23,7 +23,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { execSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const MAX_ROUNDS = 8;
@@ -192,6 +192,48 @@ export default function (pi: ExtensionAPI) {
 
 type AnyModel = { id?: string; provider?: string; reasoning?: boolean; [k: string]: any };
 
+// ── FAS KB consult (fix: /ap must not switch onto FAS-blocked lanes) ──
+// Thresholds mirror fas core.ts (VERIFIED_FAILURE_THRESHOLD=3,
+// PROVIDER_BREAKER_THRESHOLD=2, COOLDOWN=30min). Local copy on purpose:
+// autopilot must not import the FAS extension (independent boundaries).
+const AP_FAS_FAIL_THRESHOLD = 3;
+const AP_FAS_PROVIDER_THRESHOLD = 2;
+const AP_FAS_PROVIDER_COOLDOWN_MS = 30 * 60 * 1000;
+
+function apFasKbPath(): string {
+  const override = process.env.AP_FAS_KB_PATH?.trim();
+  if (override) return override;
+  return join(process.env.HOME ?? ".", ".pi", "agent", "fas-knowledge.json");
+}
+
+function loadApFasKb(): any {
+  try {
+    const raw = readFileSync(apFasKbPath(), "utf8");
+    const kb = JSON.parse(raw);
+    if (!kb || typeof kb !== "object" || typeof kb.stats !== "object") return null;
+    return kb;
+  } catch {
+    return null;
+  }
+}
+
+function apLaneBlocked(kb: any, provider: string, id: string, now: number): boolean {
+  if (!kb) return false;
+  const st = kb.stats?.[`${provider}/${id}`];
+  if (st && (st.consecutiveFailures ?? 0) >= AP_FAS_FAIL_THRESHOLD) return true;
+  const p = kb.providers?.[provider];
+  if (p && (p.consec ?? 0) >= AP_FAS_PROVIDER_THRESHOLD
+    && typeof p.lastSeen === "number" && now - p.lastSeen < AP_FAS_PROVIDER_COOLDOWN_MS) return true;
+  return false;
+}
+
+function apIsProvenHealthy(kb: any, m: AnyModel, now: number): boolean {
+  if (!kb || !m?.provider || !m?.id) return false;
+  if (apLaneBlocked(kb, m.provider, m.id, now)) return false;
+  const st = kb.stats?.[`${m.provider}/${m.id}`];
+  return !!st && (st.successes ?? 0) > 0 && (st.consecutiveFailures ?? 0) === 0;
+}
+
 async function setupReasoningModel(pi: ExtensionAPI, ctx: any): Promise<AnyModel | null> {
   // If FAS is active (fas-router/auto), delegate model selection to FAS.
   // Do NOT override with a catalog-scanned reasoning model — FAS owns
@@ -210,6 +252,21 @@ async function setupReasoningModel(pi: ExtensionAPI, ctx: any): Promise<AnyModel
     // fall through to empty
   }
 
+  // FAS-aware ordering: skip lanes the FAS KB already blocks (verified
+  // failures / provider cooldown) and prefer already-proven lanes over the
+  // static hint list — /ap must not switch a working lane onto dead quota.
+  const kb = loadApFasKb();
+  const now = Date.now();
+
+  // T6: current lane already proven healthy → keep it, no switch at all.
+  if (ctx?.model && apIsProvenHealthy(kb, ctx.model, now)) {
+    ctx.ui.notify(
+      `🤖 Autopilot: keeping proven lane ${ctx.model.provider}/${ctx.model.id} (FAS evidence)`,
+      "info",
+    );
+    return ctx.model;
+  }
+
   const ranked = all
     .filter((m) => m && m.id && !String(m.id).endsWith(":disabled"))
     .map((m) => {
@@ -218,7 +275,13 @@ async function setupReasoningModel(pi: ExtensionAPI, ctx: any): Promise<AnyModel
       return { model: m, score: reasoning ? 1 : 0, id };
     })
     .filter((m) => m.score > 0)
-    .sort((a, b) => b.id.length - a.id.length || a.id.localeCompare(b.id));
+    .filter((r) => !apLaneBlocked(kb, r.model.provider, r.id, now))
+    .sort((a, b) => {
+      const pa = apIsProvenHealthy(kb, a.model, now) ? 0 : 1;
+      const pb = apIsProvenHealthy(kb, b.model, now) ? 0 : 1;
+      if (pa !== pb) return pa - pb;
+      return b.id.length - a.id.length || a.id.localeCompare(b.id);
+    });
 
   for (const hint of REASONING_MODEL_HINTS) {
     const pick = ranked.find((r) => r.id.includes(hint));
